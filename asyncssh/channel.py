@@ -9,7 +9,7 @@
 #
 # Contributors:
 #     Ron Frederick - initial implementation, API, and documentation
-#     Michael Keller - fix of race condition in _create_session
+#     Michael Keller - fix of race condition in _create_session, SSHTCPChannel
 
 """SSH channel and session handlers"""
 
@@ -1224,6 +1224,14 @@ class SSHServerChannel(SSHChannel):
 class SSHTCPChannel(SSHChannel):
     """SSH TCP channel"""
 
+
+    def __init__(self, conn, loop, encoding, window, max_pktsize):
+        super().__init__(conn, loop, encoding, window, max_pktsize)
+
+        # we might receive data before a self._session is set, so buffer them
+        self._recv_paused = True
+
+
     @asyncio.coroutine
     def _finish_open_request(self, session):
         """Finish processing a TCP channel open request"""
@@ -1232,6 +1240,8 @@ class SSHTCPChannel(SSHChannel):
 
         if self._session:
             self._session.session_started()
+
+            self.resume_reading() # processed received data
 
     @asyncio.coroutine
     def _open(self, session_factory, chantype, host, port,
@@ -1253,6 +1263,8 @@ class SSHTCPChannel(SSHChannel):
         self._session = session_factory()
         self._session.connection_made(self)
         self._session.session_started()
+        
+        self.resume_reading() # processed received data
 
         return self, self._session
 
