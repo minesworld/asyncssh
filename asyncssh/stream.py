@@ -244,7 +244,15 @@ class SSHStreamSession:
         self._connection_lost = True
         self._exception = exc
 
-        if not self._eof_received:
+        if exc and not self._eof_received:
+            # if the connection not being closed
+            # readers should get a BrokenPipeError
+            brokenpipe_exc = BrokenPipeError()
+            for datatype in self._recv_buf:
+                self._recv_buf[datatype].append(brokenpipe_exc)
+                self._unblock_read(datatype)
+
+        elif not self._eof_received:
             self.eof_received()
 
         if self._write_paused:
