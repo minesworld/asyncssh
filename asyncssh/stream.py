@@ -252,8 +252,8 @@ class SSHStreamSession:
             if exc:
                 for datatype in self._read_waiter.keys():
                     self._deliver_exception(datatype, exc)
-            else:
-                self.eof_received()
+
+            self.eof_received()
 
         if self._write_paused:
             self._unblock_drain()
