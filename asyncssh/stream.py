@@ -250,8 +250,8 @@ class SSHStreamSession:
 
         if not self._eof_received:
             if exc:
-                for datatype in self._read_waiter.keys():
-                    self._deliver_exception(datatype, exc)
+                for datatype in self._recv_buf:
+                    self._deliver_exception(exc, datatype)
 
             self.eof_received()
 
