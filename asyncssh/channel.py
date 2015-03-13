@@ -1210,7 +1210,7 @@ class SSHServerChannel(SSHChannel):
         if self._send_state not in {'open', 'eof_pending', 'eof_sent'}:
             raise OSError('Channel not open')
 
-        self._send_request(b'exit-status', UInt32(status))
+        self._send_request(b'exit-status', Int32(status))
         self.close()
 
     def exit_with_signal(self, signal, core_dumped=False,
