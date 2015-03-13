@@ -232,6 +232,10 @@ class SSHStreamSession:
 
         self._drain_waiters = []
 
+    def _deliver_exception(self, exc, datatype=None):
+        self._recv_buf[datatype].append(exc)
+        self._unblock_read(datatype)
+
     def connection_made(self, chan):
         self._chan = chan
         self._limit = self._chan._init_recv_window
@@ -244,22 +248,12 @@ class SSHStreamSession:
         self._connection_lost = True
         self._exception = exc
 
-        if exc and not self._eof_received:
-
-            # if the connection not being closed
-            # readers should get a BrokenPipeError
-            # also let reads beyond the exception
-            # fail with EOF
-
-            self._eof_received = True
-            brokenpipe_exc = BrokenPipeError()
-
-            for datatype in self._recv_buf:
-                self._recv_buf[datatype].append(brokenpipe_exc)
-                self._unblock_read(datatype)
-
-        elif not self._eof_received:
-            self.eof_received()
+        if not self._eof_received:
+            if exc:
+                for datatype in self._read_waiter.keys():
+                    self._deliver_exception(datatype, exc)
+            else:
+                self.eof_received()
 
         if self._write_paused:
             self._unblock_drain()
@@ -403,17 +397,14 @@ class SSHServerStreamSession(SSHStreamSession, SSHServerSession):
                 asyncio.async(handler)
 
     def break_received(self, msec):
-        self._recv_buf[None].append(BreakReceived(msec))
-        self._unblock_read(None)
+        self._deliver_exception(BreakReceived(msec))
         return True
 
     def signal_received(self, signal):
-        self._recv_buf[None].append(SignalReceived(signal))
-        self._unblock_read(None)
+        self._deliver_exception(SignalReceived(signal))
 
     def terminal_size_changed(self, *args):
-        self._recv_buf[None].append(TerminalSizeChanged(*args))
-        self._unblock_read(None)
+        self._deliver_exception(TerminalSizeChanged(*args))
 
 
 class SSHTCPStreamSession(SSHStreamSession, SSHTCPSession):
