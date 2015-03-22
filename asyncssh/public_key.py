@@ -9,10 +9,12 @@
 #
 # Contributors:
 #     Ron Frederick - initial implementation, API, and documentation
+#     Michael Keller - read_authorized_key_list
 
 """SSH asymmetric encryption handlers"""
 
 import binascii, ipaddress, time
+from collections import namedtuple
 
 from .asn1 import *
 from .logging import *
@@ -1022,3 +1024,93 @@ def read_certificate_list(filename):
             certs.append(decode_ssh_certificate(_decode_openssh(line)))
 
     return certs
+
+
+AuthorizedParameter = namedtuple("AuthorizedParameter", [ "command", "options" ])
+
+def read_authorized_key_list(path, keytypes=( "ssh-rsa", "ssh-dsa" )):
+    """Read the SSH client keys, command and options from a file
+
+    This function gets the SSH client keys, command and options from a
+    file which is in authorized_keys format.
+
+    :param string path:
+        The file to read
+    :param keytypes:
+        Which types of ssh keys are recognized
+
+    :returns: A dictionary whose keys are the client keys and values are of :class:`AuthorizedParameter`
+    """
+
+    # each line of the file is reversed and processed
+    # this way the public key comes before the options and command
+    # all characters within command="" are given back as is
+    # the callee should process these with shlex further...
+
+    keys_authorizedparameters = {}
+
+    rkeytypes = [ keytype[::-1] for keytype in keytypes ]
+
+    with open(path, "r") as f:
+        data = f.read()
+
+    for line in data.lstrip().splitlines():
+        rline = line.strip()[::-1] # reverse the line
+
+        if not rline:
+            continue
+
+        relements = rline.split(" ")
+
+        rkeydata, rkeytype = None, None
+        while relements:
+            rkeytype = relements.pop(0)
+            if not rkeytype:
+                continue
+            if rkeytype in rkeytypes:
+                break
+            rkeydata = rkeytype
+            rkeytype = None
+
+        if not rkeytype:
+            raise KeyImportError('Invalid OpenSSH public key or certificate')
+
+        try:
+            keydata = binascii.a2b_base64(rkeydata[::-1])
+        except binascii.Error:
+            raise KeyImportError('Invalid OpenSSH public key or certificate')
+
+
+        key = decode_ssh_public_key(keydata)
+        options = []
+        command = None
+
+        if relements:
+            # we have some command and or options left over
+            # join together by space and split again by comma to get the options
+            relements = " ".join(relements).split(",")
+
+        # options
+
+        while relements:
+            relement = relements.pop(0)
+            if relement.startswith('"'):
+                relements.insert(0, relement)
+                break # command
+            options.append(relement[::-1])
+
+        # command
+
+        if relements:
+            # we have a command left over
+            # join together by comma and use only the value
+            commandelement = ','.join(relements)[::-1]
+            if not commandelement.startswith('command="'):
+                raise KeyImportError('Invalid OpenSSH options')
+
+            command = commandelement[len('command="'):-len('"')]
+
+
+        keys_authorizedparameters[key] = AuthorizedParameter(command=command, options=options)
+
+    return keys_authorizedparameters
