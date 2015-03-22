@@ -14,6 +14,7 @@
 """SSH asymmetric encryption handlers"""
 
 import binascii, ipaddress, time
+from collections import namedtuple
 from os import urandom
 
 try:
