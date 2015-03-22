@@ -9,7 +9,6 @@
 #
 # Contributors:
 #     Ron Frederick - initial implementation, API, and documentation
-#     Michael Keller - bugfix
 
 """SSH stream handlers"""
 
@@ -232,10 +231,6 @@ class SSHStreamSession:
 
         self._drain_waiters = []
 
-    def _deliver_exception(self, exc, datatype=None):
-        self._recv_buf[datatype].append(exc)
-        self._unblock_read(datatype)
-
     def connection_made(self, chan):
         self._chan = chan
         self._limit = self._chan._init_recv_window
@@ -250,8 +245,8 @@ class SSHStreamSession:
 
         if not self._eof_received:
             if exc:
-                for datatype in self._recv_buf:
-                    self._deliver_exception(exc, datatype)
+                for datatype in self._read_waiter.keys():
+                    self._recv_buf[datatype].append(exc)
 
             self.eof_received()
 
@@ -295,12 +290,9 @@ class SSHStreamSession:
                         raise recv_buf.pop(0)
 
                 l = len(recv_buf[0])
-                if n > 0 and l >= n:
-                    if l > n:
-                        data.append(recv_buf[0][:n])
-                        recv_buf[0] = recv_buf[0][n:]
-                    else:
-                        data.append(recv_buf.pop(0))
+                if n > 0 and l > n:
+                    data.append(recv_buf[0][:n])
+                    recv_buf[0] = recv_buf[0][n:]
                     self._recv_buf_len -= n
                     n = 0
                     break
@@ -397,14 +389,17 @@ class SSHServerStreamSession(SSHStreamSession, SSHServerSession):
                 asyncio.async(handler)
 
     def break_received(self, msec):
-        self._deliver_exception(BreakReceived(msec))
+        self._recv_buf[None].append(BreakReceived(msec))
+        self._unblock_read(None)
         return True
 
     def signal_received(self, signal):
-        self._deliver_exception(SignalReceived(signal))
+        self._recv_buf[None].append(SignalReceived(signal))
+        self._unblock_read(None)
 
     def terminal_size_changed(self, *args):
-        self._deliver_exception(TerminalSizeChanged(*args))
+        self._recv_buf[None].append(TerminalSizeChanged(*args))
+        self._unblock_read(None)
 
 
 class SSHTCPStreamSession(SSHStreamSession, SSHTCPSession):

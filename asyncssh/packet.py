@@ -27,13 +27,8 @@ def Boolean(value):
 
     return Byte(bool(value))
 
-def Int32(value):
-    """Encode a 32-bit signed integer value"""
-
-    return value.to_bytes(4, 'big', signed=True)
-
 def UInt32(value):
-    """Encode a 32-bit unsigned integer value"""
+    """Encode a 32-bit integer value"""
 
     return value.to_bytes(4, 'big')
 
