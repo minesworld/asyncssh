@@ -9,15 +9,16 @@
 #
 # Contributors:
 #     Ron Frederick - initial implementation, API, and documentation
-#     Michael Keller - fix of race condition in _create_session
 
 """SSH channel and session handlers"""
 
 import asyncio
 
 from .constants import *
+from .logging import *
 from .misc import *
 from .packet import *
+
 
 _EOF = object()
 
@@ -61,7 +62,7 @@ class SSHChannel(SSHPacketHandler):
         self._init_recv_window = window
         self._recv_window = window
         self._recv_pktsize = max_pktsize
-        self._recv_paused = False
+        self._recv_paused = True
         self._recv_buf = []
 
         self._open_waiter = None
@@ -87,7 +88,8 @@ class SSHChannel(SSHPacketHandler):
 
         if self._close_waiters:
             for waiter in self._close_waiters:
-                waiter.set_result(None)
+                if not waiter.cancelled():
+                    waiter.set_result(None)
 
             self._close_waiters = []
 
@@ -164,7 +166,7 @@ class SSHChannel(SSHPacketHandler):
                     data = data.decode(self._encoding)
                 except UnicodeDecodeError:
                     raise DisconnectError(DISC_PROTOCOL_ERROR,
-                                          'Unicode decode error')
+                                          'Unicode decode error') from None
 
             self._session.data_received(data, datatype)
 
@@ -223,7 +225,7 @@ class SSHChannel(SSHPacketHandler):
         except ChannelOpenError as exc:
             self._conn._send_channel_open_failure(self._send_chan, exc.code,
                                                   exc.reason, exc.lang)
-            self._cleanup()
+            self._loop.call_soon(self._cleanup)
 
     def _process_open_confirmation(self, send_chan, send_window, send_pktsize,
                                    packet):
@@ -240,7 +242,8 @@ class SSHChannel(SSHPacketHandler):
         self._send_state = 'open'
         self._recv_state = 'open'
 
-        self._open_waiter.set_result(packet)
+        if not self._open_waiter.cancelled():
+            self._open_waiter.set_result(packet)
         self._open_waiter = None
 
     def _process_open_failure(self, code, reason, lang):
@@ -252,7 +255,7 @@ class SSHChannel(SSHPacketHandler):
 
         self._open_waiter.set_exception(ChannelOpenError(code, reason, lang))
         self._open_waiter = None
-        self._cleanup()
+        self._loop.call_soon(self._cleanup)
 
     def _process_window_adjust(self, pkttype, packet):
         if self._recv_state not in {'open', 'eof_received'}:
@@ -313,7 +316,7 @@ class SSHChannel(SSHPacketHandler):
         if self._send_state not in {'close_sent', 'closed'}:
             self._send_packet(MSG_CHANNEL_CLOSE)
 
-        self._cleanup()
+        self._loop.call_soon(self._cleanup)
 
     def _process_request(self, pkttype, packet):
         if self._recv_state not in {'open', 'eof_received'}:
@@ -329,7 +332,7 @@ class SSHChannel(SSHPacketHandler):
             request = request.decode('ascii')
         except UnicodeDecodeError:
             raise DisconnectError(DISC_PROTOCOL_ERROR,
-                                  'Invalid channel request')
+                                  'Invalid channel request') from None
 
         name = '_process_' + request.replace('-', '_') + '_request'
         handler = getattr(self, name, None)
@@ -343,6 +346,7 @@ class SSHChannel(SSHPacketHandler):
 
         if result and request in ('shell', 'exec', 'subsystem'):
             self._session.session_started()
+            self.resume_reading()
 
     def _process_response(self, pkttype, packet):
         if self._send_state not in {'open', 'eof_pending', 'eof_sent',
@@ -353,7 +357,8 @@ class SSHChannel(SSHPacketHandler):
 
         if self._request_waiters:
             waiter = self._request_waiters.pop(0)
-            waiter.set_result(pkttype == MSG_CHANNEL_SUCCESS)
+            if not waiter.cancelled():
+                waiter.set_result(pkttype == MSG_CHANNEL_SUCCESS)
         else:
             raise DisconnectError(DISC_PROTOCOL_ERROR,
                                   'Unexpected channel response')
@@ -650,9 +655,8 @@ class SSHClientChannel(SSHChannel):
         # Client sessions should have no extra data in the open confirmation
         packet.check_end()
 
-        self._session = session_factory() 
+        self._session = session_factory()
         self._session.connection_made(self)
-        session = self._session # remember the session, self._session might be get lost as ._cleanup() might be called during ._create()
 
         for name, value in env.items():
             name = str(name).encode('utf-8')
@@ -706,9 +710,14 @@ class SSHClientChannel(SSHChannel):
             raise ChannelOpenError(OPEN_REQUEST_SESSION_FAILED,
                                    'Session request failed')
 
-        # use remembered session. self._session might be None already...
-        session.session_started()
-        return self, session
+        if not self._session:
+            raise ChannelOpenError(OPEN_REQUEST_SESSION_FAILED,
+                                   'Channel closed during session startup')
+
+        self._session.session_started()
+        self.resume_reading()
+
+        return self, self._session
 
     def _process_xon_xoff_request(self, packet):
         """Process a request to set up XON/XOFF processing"""
@@ -722,7 +731,7 @@ class SSHClientChannel(SSHChannel):
     def _process_exit_status_request(self, packet):
         """Process a request to deliver exit status"""
 
-        status = packet.get_uint32()
+        status = packet.get_uint32() & 0xff
         packet.check_end()
 
         self._exit_status = status
@@ -744,7 +753,7 @@ class SSHClientChannel(SSHChannel):
             lang = lang.decode('ascii')
         except UnicodeDecodeError:
             raise DisconnectError(DISC_PROTOCOL_ERROR,
-                                  'Invalid exit signal request')
+                                  'Invalid exit signal request') from None
 
         self._exit_signal = (signal, core_dumped, msg, lang)
         self._session.exit_signal_received(signal, core_dumped, msg, lang)
@@ -892,7 +901,11 @@ class SSHServerChannel(SSHChannel):
         try:
             self._term_type = term_type.decode('ascii')
         except UnicodeDecodeError:
-            raise DisconnectError(DISC_PROTOCOL_ERROR, 'Invalid pty request')
+            raise DisconnectError(DISC_PROTOCOL_ERROR,
+                                  'Invalid pty request') from None
+
+        if not self._conn.check_certificate_permission('permit-pty'):
+            return False
 
         self._term_size = (width, height, pixwidth, pixheight)
 
@@ -929,12 +942,28 @@ class SSHServerChannel(SSHChannel):
         self._env[name] = value
         return True
 
+    def _start_session(self, command=None, subsystem=None):
+        forced_command = self._conn.get_certificate_option('force-command')
+        if forced_command:
+            command = forced_command
+
+        if command is not None:
+            self._command = command
+            result = self._session.exec_requested(command)
+        elif subsystem is not None:
+            self._subsystem = subsystem
+            result = self._session.subsystem_requested(subsystem)
+        else:
+            result = self._session.shell_requested()
+
+        return result
+
     def _process_shell_request(self, packet):
         """Process a request to open a shell"""
 
         packet.check_end()
 
-        return self._session.shell_requested()
+        return self._start_session()
 
     def _process_exec_request(self, packet):
         """Process a request to execute a command"""
@@ -947,8 +976,7 @@ class SSHServerChannel(SSHChannel):
         except UnicodeDecodeError:
             return False
 
-        self._command = command
-        return self._session.exec_requested(command)
+        return self._start_session(command=command)
 
     def _process_subsystem_request(self, packet):
         """Process a request to open a subsystem"""
@@ -961,8 +989,7 @@ class SSHServerChannel(SSHChannel):
         except UnicodeDecodeError:
             return False
 
-        self._subsystem = subsystem
-        return self._session.subsystem_requested(subsystem)
+        return self._start_session(subsystem=subsystem)
 
     def _process_window_change_request(self, packet):
         """Process a request to change the window size"""
@@ -1183,7 +1210,7 @@ class SSHServerChannel(SSHChannel):
         if self._send_state not in {'open', 'eof_pending', 'eof_sent'}:
             raise OSError('Channel not open')
 
-        self._send_request(b'exit-status', UInt32(status))
+        self._send_request(b'exit-status', UInt32(status & 0xff))
         self.close()
 
     def exit_with_signal(self, signal, core_dumped=False,
@@ -1232,6 +1259,7 @@ class SSHTCPChannel(SSHChannel):
 
         if self._session:
             self._session.session_started()
+            self.resume_reading()
 
     @asyncio.coroutine
     def _open(self, session_factory, chantype, host, port,
@@ -1253,6 +1281,7 @@ class SSHTCPChannel(SSHChannel):
         self._session = session_factory()
         self._session.connection_made(self)
         self._session.session_started()
+        self.resume_reading()
 
         return self, self._session
 

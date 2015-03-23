@@ -9,15 +9,15 @@
 #
 # Contributors:
 #     Ron Frederick - initial implementation, API, and documentation
-#     Michael Keller - bugfix
 
 """SSH stream handlers"""
 
 import asyncio
 
-from .constants import *
-from .misc import *
 from .channel import *
+from .constants import *
+from .logging import *
+from .misc import *
 
 
 class SSHReader:
@@ -220,12 +220,14 @@ class SSHStreamSession:
     def _unblock_read(self, datatype):
         waiter = self._read_waiter[datatype]
         if waiter:
-            waiter.set_result(None)
+            if not waiter.cancelled():
+                waiter.set_result(None)
             self._read_waiter[datatype] = None
 
     def _unblock_drain(self):
         for waiter in self._drain_waiters:
-            waiter.set_result(None)
+            if not waiter.cancelled():
+                waiter.set_result(None)
 
         self._drain_waiters = []
 
@@ -242,6 +244,10 @@ class SSHStreamSession:
         self._exception = exc
 
         if not self._eof_received:
+            if exc:
+                for datatype in self._read_waiter.keys():
+                    self._recv_buf[datatype].append(exc)
+
             self.eof_received()
 
         if self._write_paused:
@@ -284,12 +290,9 @@ class SSHStreamSession:
                         raise recv_buf.pop(0)
 
                 l = len(recv_buf[0])
-                if n > 0 and l >= n:
-                    if l > n:
-                        data.append(recv_buf[0][:n])
-                        recv_buf[0] = recv_buf[0][n:]
-                    else:
-                        data.append(recv_buf.pop(0))
+                if n > 0 and l > n:
+                    data.append(recv_buf[0][:n])
+                    recv_buf[0] = recv_buf[0][n:]
                     self._recv_buf_len -= n
                     n = 0
                     break
